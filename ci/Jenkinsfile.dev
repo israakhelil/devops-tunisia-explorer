@@ -1,0 +1,137 @@
+// =====================================================================
+// PIPELINE 2 : Build complet sur push (branche dev)
+// Déclencheur : push / merge sur la branche dev
+// Stages : Checkout > Setup > Unit Tests > Build > Run (Docker) > Smoke Test > Archive Artifacts
+//          (+ nettoyage dans le bloc post)
+// Différence avec le pipeline PR : on ajoute les tests unitaires (pytest).
+// =====================================================================
+
+def parallelPython(Closure body) {
+  def branches = [:]
+  ['3.11', '3.12'].each { v ->
+    branches["Python ${v}"] = { body(v) }
+  }
+  parallel branches
+}
+
+pipeline {
+  agent any
+
+  options {
+    timestamps()
+    timeout(time: 25, unit: 'MINUTES')
+    buildDiscarder(logRotator(numToKeepStr: '15'))
+  }
+
+  environment {
+    IMAGE = 'tunisia-explorer'
+    TAG   = "dev-${env.BUILD_NUMBER}"                   // ex : dev-12
+  }
+
+  stages {
+
+    stage('Checkout') {
+      steps {
+        script {
+          def scmVars = checkout scm
+          env.COMMIT = scmVars.GIT_COMMIT.take(7)
+        }
+        bat 'git log -1 --oneline'
+      }
+    }
+
+    stage('Setup') {
+      steps {
+        bat 'docker version --format "Docker serveur : {{.Server.Version}}"'
+        bat 'if exist reports rmdir /s /q reports'
+        bat 'mkdir reports'
+      }
+    }
+
+    stage('Unit Tests') {
+      steps {
+        script {
+          parallelPython { v ->
+            // Les tests tournent pendant le build de l'étape "test" du Dockerfile.
+            // Si un test échoue, le build Docker échoue et le stage devient rouge.
+            bat """
+              docker build --target test --build-arg PY_VERSION=${v} -t ${IMAGE}:test-py${v} . > reports\\tests-py${v}.log 2>&1
+              set RC=%ERRORLEVEL%
+              type reports\\tests-py${v}.log
+              exit /b %RC%
+            """
+          }
+        }
+      }
+    }
+
+    stage('Build') {
+      steps {
+        script {
+          parallelPython { v ->
+            bat """
+              docker build --build-arg PY_VERSION=${v} --build-arg APP_VERSION=${TAG} --build-arg GIT_COMMIT=${env.COMMIT} -t ${IMAGE}:${TAG}-py${v} . > reports\\build-py${v}.log 2>&1
+              set RC=%ERRORLEVEL%
+              type reports\\build-py${v}.log
+              exit /b %RC%
+            """
+          }
+        }
+      }
+    }
+
+    stage('Run (Docker)') {
+      steps {
+        script {
+          parallelPython { v ->
+            bat "docker run -d --name api-${TAG}-py${v} ${IMAGE}:${TAG}-py${v}"
+          }
+        }
+      }
+    }
+
+    stage('Smoke Test') {
+      steps {
+        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+          script {
+            parallelPython { v ->
+              bat """
+                docker exec -i api-${TAG}-py${v} python - < scripts\\smoke_check.py > reports\\smoke-py${v}.txt 2>&1
+                set RC=%ERRORLEVEL%
+                if %RC%==0 (echo SMOKE: PASSED>> reports\\smoke-py${v}.txt) else (echo SMOKE: FAILED>> reports\\smoke-py${v}.txt)
+                type reports\\smoke-py${v}.txt
+                exit /b %RC%
+              """
+            }
+          }
+        }
+      }
+    }
+
+    stage('Archive Artifacts') {
+      steps {
+        writeFile file: 'reports/pipeline-report.txt', text: """Pipeline    : ${env.JOB_NAME} #${env.BUILD_NUMBER}
+Declencheur : push sur la branche ${env.BRANCH_NAME}
+Commit      : ${env.COMMIT}
+Python      : 3.11 et 3.12 (en parallele)
+Tests       : voir tests-py3.11.log et tests-py3.12.log
+Smoke tests : voir smoke-py3.11.txt et smoke-py3.12.txt
+"""
+        archiveArtifacts artifacts: 'reports/**', fingerprint: true
+      }
+    }
+  }
+
+  post {
+    always {
+      script {
+        parallelPython { v ->
+          bat(script: "docker rm -f api-${TAG}-py${v}", returnStatus: true)
+        }
+      }
+      bat(script: 'docker image prune -f', returnStatus: true)
+    }
+    success { echo 'PIPELINE DEV : PASSED' }
+    failure { echo 'PIPELINE DEV : FAILED' }
+  }
+}

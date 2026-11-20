@@ -1,0 +1,123 @@
+// =====================================================================
+// PIPELINE 1 : Build & Smoke sur Pull Request (vers la branche dev)
+// Déclencheur : ouverture / mise à jour d'une Pull Request vers dev
+// Stages : Checkout > Setup > Build > Run (Docker) > Smoke Test > Archive Artifacts
+//          (+ nettoyage dans le bloc post)
+// Ce Jenkinsfile utilise "bat" car Jenkins tourne sous Windows.
+// =====================================================================
+
+// Exécute le même bloc pour chaque version de Python, EN PARALLÈLE.
+def parallelPython(Closure body) {
+  def branches = [:]
+  ['3.11', '3.12'].each { v ->
+    branches["Python ${v}"] = { body(v) }
+  }
+  parallel branches
+}
+
+pipeline {
+  agent any
+
+  options {
+    timestamps()                                        // heure devant chaque ligne de log
+    timeout(time: 20, unit: 'MINUTES')                  // sécurité : stoppe un build bloqué
+    buildDiscarder(logRotator(numToKeepStr: '15'))      // garde seulement les 15 derniers builds
+  }
+
+  environment {
+    IMAGE = 'tunisia-explorer'
+    TAG   = "pr-${env.CHANGE_ID}"                       // ex : pr-7
+  }
+
+  stages {
+
+    stage('Checkout') {
+      steps {
+        script {
+          def scmVars = checkout scm                    // récupère le code de la PR
+          env.COMMIT = scmVars.GIT_COMMIT.take(7)       // commit court (7 caractères)
+        }
+        bat 'git log -1 --oneline'
+      }
+    }
+
+    stage('Setup') {
+      steps {
+        bat 'docker version --format "Docker serveur : {{.Server.Version}}"'
+        bat 'if exist reports rmdir /s /q reports'
+        bat 'mkdir reports'                             // dossier des logs et résultats
+      }
+    }
+
+    stage('Build') {
+      steps {
+        script {
+          parallelPython { v ->
+            bat """
+              docker build --build-arg PY_VERSION=${v} --build-arg APP_VERSION=${TAG} --build-arg GIT_COMMIT=${env.COMMIT} -t ${IMAGE}:${TAG}-py${v} . > reports\\build-py${v}.log 2>&1
+              set RC=%ERRORLEVEL%
+              type reports\\build-py${v}.log
+              exit /b %RC%
+            """
+          }
+        }
+      }
+    }
+
+    stage('Run (Docker)') {
+      steps {
+        script {
+          parallelPython { v ->
+            bat "docker run -d --name api-${TAG}-py${v} ${IMAGE}:${TAG}-py${v}"
+          }
+        }
+      }
+    }
+
+    stage('Smoke Test') {
+      steps {
+        // catchError : si le smoke échoue, le build devient FAILURE
+        // mais le stage "Archive Artifacts" s'exécute quand même (on garde les preuves).
+        catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
+          script {
+            parallelPython { v ->
+              bat """
+                docker exec -i api-${TAG}-py${v} python - < scripts\\smoke_check.py > reports\\smoke-py${v}.txt 2>&1
+                set RC=%ERRORLEVEL%
+                if %RC%==0 (echo SMOKE: PASSED>> reports\\smoke-py${v}.txt) else (echo SMOKE: FAILED>> reports\\smoke-py${v}.txt)
+                type reports\\smoke-py${v}.txt
+                exit /b %RC%
+              """
+            }
+          }
+        }
+      }
+    }
+
+    stage('Archive Artifacts') {
+      steps {
+        writeFile file: 'reports/pipeline-report.txt', text: """Pipeline    : ${env.JOB_NAME} #${env.BUILD_NUMBER}
+Declencheur : Pull Request ${env.CHANGE_ID} (${env.CHANGE_BRANCH} -> ${env.CHANGE_TARGET})
+Commit      : ${env.COMMIT}
+Python      : 3.11 et 3.12 (en parallele)
+Smoke tests : voir smoke-py3.11.txt et smoke-py3.12.txt
+"""
+        archiveArtifacts artifacts: 'reports/**', fingerprint: true
+      }
+    }
+  }
+
+  post {
+    always {
+      // Nettoyage : suppression des conteneurs de ce build (même si le build a échoué)
+      script {
+        parallelPython { v ->
+          bat(script: "docker rm -f api-${TAG}-py${v}", returnStatus: true)
+        }
+      }
+      bat(script: 'docker image prune -f', returnStatus: true)
+    }
+    success { echo 'PIPELINE PR : PASSED' }
+    failure { echo 'PIPELINE PR : FAILED' }
+  }
+}

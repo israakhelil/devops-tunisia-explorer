@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tunisia Explorer</title>
+<style>
+  body{font-family:system-ui,sans-serif;max-width:640px;margin:2rem auto;padding:0 1rem;color:#222}
+  h1{color:#c8102e}
+  select{padding:.4rem;font-size:1rem}
+  table{width:100%;border-collapse:collapse;margin-top:1rem}
+  th,td{text-align:left;padding:.5rem;border-bottom:1px solid #ddd}
+  th{background:#f5f7fa}
+  footer{margin-top:2rem;font-size:.85rem;color:#666;border-top:1px solid #ddd;padding-top:.8rem}
+</style>
+</head>
+<body>
+<h1>Tunisia Explorer</h1>
+<p>Les 24 gouvernorats de Tunisie, par région.</p>
+<label>Région :
+  <select id="region"><option value="">Toutes</option></select>
+</label>
+<p id="count"></p>
+<table>
+  <thead><tr><th>Gouvernorat</th><th>Région</th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<footer id="info">Chargement des infos de build...</footer>
+<script>
+async function getJson(url) { return (await fetch(url)).json(); }
+
+async function loadList() {
+  const region = document.getElementById('region').value;
+  const url = region ? '/api/gouvernorats?region=' + encodeURIComponent(region) : '/api/gouvernorats';
+  const items = await getJson(url);
+  const tbody = document.getElementById('rows');
+  tbody.replaceChildren();
+  items.forEach(g => {
+    const tr = document.createElement('tr');
+    [g.nom, g.region].forEach(text => {
+      const td = document.createElement('td');
+      td.textContent = text;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  document.getElementById('count').textContent = items.length + ' gouvernorat(s)';
+}
+
+async function init() {
+  const regions = await getJson('/api/regions');
+  const select = document.getElementById('region');
+  regions.forEach(r => {
+    const o = document.createElement('option');
+    o.value = r.region;
+    o.textContent = r.region + ' (' + r.total + ')';
+    select.appendChild(o);
+  });
+  select.addEventListener('change', loadList);
+  await loadList();
+  const h = await getJson('/health');
+  document.getElementById('info').textContent =
+    'Build : version ' + h.version + ' | commit ' + h.commit + ' | Python ' + h.python + ' | statut ' + h.status;
+}
+init();
+</script>
+</body>
+</html>
