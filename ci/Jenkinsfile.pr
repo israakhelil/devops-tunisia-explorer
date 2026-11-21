@@ -19,6 +19,7 @@ pipeline {
   agent any
 
   options {
+    disableConcurrentBuilds()
     timestamps()                                        // heure devant chaque ligne de log
     timeout(time: 20, unit: 'MINUTES')                  // sécurité : stoppe un build bloqué
     buildDiscarder(logRotator(numToKeepStr: '15'))      // garde seulement les 15 derniers builds
