@@ -40,7 +40,7 @@ def liste(region: str | None = None):
     return [g for g in GOUVERNORATS if g["region"].lower() == region.strip().lower()]
 
 
-@app.get("/api/gouvernorat/{nom}")
+@app.get("/api/gouvernorats/{nom}")
 def detail(nom: str):
     """Détail d'un gouvernorat (erreur 404 s'il n'existe pas)."""
     for g in GOUVERNORATS:
