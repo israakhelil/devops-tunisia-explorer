@@ -35,3 +35,5 @@ docker build --build-arg PY_VERSION=3.12 -t tunisia-explorer:local .
 docker run -d --name api-local -p 5000:5000 tunisia-explorer:local
 docker exec -i api-local python - < scripts/smoke_check.py
 ```
+
+Projet réalisé dans le cadre du cours Introduction au DevOps (ISG Sousse).
